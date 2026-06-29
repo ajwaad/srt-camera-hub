@@ -1,0 +1,322 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="#000000">
+
+    <!-- Thin top bar: status + bitrate + settings -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="36dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingHorizontal="10dp"
+        android:background="#0D1117">
+
+        <TextView
+            android:id="@+id/statusText"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Stopped"
+            android:textColor="#6B7280"
+            android:textSize="12sp" />
+
+        <TextView
+            android:id="@+id/bitrateLabel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="0 kbps"
+            android:textColor="#9CA3AF"
+            android:textSize="11sp"
+            android:fontFamily="monospace"
+            android:layout_marginEnd="8dp" />
+
+        <ImageButton
+            android:id="@+id/settingsBtn"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:src="@android:drawable/ic_menu_manage"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:tint="#9CA3AF"
+            android:scaleType="fitCenter" />
+    </LinearLayout>
+
+    <!-- Preview + ALL overlays (controls + settings) -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <com.pedro.library.view.OpenGlView
+            android:id="@+id/glView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <!-- Quick controls overlay: bottom-anchored, collapsible via tap on a small handle -->
+        <LinearLayout
+            android:id="@+id/controlsOverlay"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:orientation="vertical"
+            android:paddingHorizontal="8dp"
+            android:paddingBottom="4dp"
+            android:background="#BB0D1117">
+
+            <!-- Collapse/expand handle -->
+            <TextView
+                android:id="@+id/controlsHandle"
+                android:layout_width="match_parent"
+                android:layout_height="14dp"
+                android:gravity="center"
+                android:text="―"
+                android:textColor="#6B7280"
+                android:textSize="10sp"
+                android:clickable="true"
+                android:focusable="true" />
+
+            <LinearLayout
+                android:id="@+id/controlsBody"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="visible">
+
+                <TextView
+                    android:id="@+id/zoomLabel"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Zoom: 1.0x"
+                    android:textColor="#E5E7EB"
+                    android:textSize="11sp" />
+
+                <SeekBar
+                    android:id="@+id/zoomSeek"
+                    android:layout_width="match_parent"
+                    android:layout_height="18dp"
+                    android:max="100"
+                    android:progress="10" />
+
+                <TextView
+                    android:id="@+id/expLabel"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Exp: 1.00"
+                    android:textColor="#E5E7EB"
+                    android:textSize="11sp" />
+
+                <SeekBar
+                    android:id="@+id/expSeek"
+                    android:layout_width="match_parent"
+                    android:layout_height="18dp"
+                    android:max="200"
+                    android:progress="100" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+
+                    <androidx.appcompat.widget.SwitchCompat
+                        android:id="@+id/torchSwitch"
+                        android:layout_width="0dp"
+                        android:layout_height="24dp"
+                        android:layout_weight="1"
+                        android:text="Torch"
+                        android:textColor="#E5E7EB"
+                        android:textSize="11sp" />
+
+                    <androidx.appcompat.widget.SwitchCompat
+                        android:id="@+id/flipHSwitch"
+                        android:layout_width="0dp"
+                        android:layout_height="24dp"
+                        android:layout_weight="1"
+                        android:text="Flip H"
+                        android:textColor="#E5E7EB"
+                        android:textSize="11sp" />
+                </LinearLayout>
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- Settings panel: overlays preview, scrollable -->
+        <ScrollView
+            android:id="@+id/settingsPanel"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone"
+            android:background="#EE111827"
+            android:padding="16dp"
+            android:fillViewport="true">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Settings"
+                    android:textColor="#F3F4F6"
+                    android:textSize="16sp"
+                    android:textStyle="bold"
+                    android:layout_marginBottom="12dp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Camera"
+                    android:textColor="#9CA3AF"
+                    android:textSize="12sp" />
+
+                <Spinner
+                    android:id="@+id/cameraSpinner"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:background="@drawable/input_bg"
+                    android:layout_marginBottom="8dp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Resolution"
+                    android:textColor="#9CA3AF"
+                    android:textSize="12sp" />
+
+                <Spinner
+                    android:id="@+id/resSpinner"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:background="@drawable/input_bg"
+                    android:layout_marginBottom="8dp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Codec"
+                    android:textColor="#9CA3AF"
+                    android:textSize="12sp" />
+
+                <Spinner
+                    android:id="@+id/codecSpinner"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:background="@drawable/input_bg"
+                    android:layout_marginBottom="8dp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="FPS"
+                    android:textColor="#9CA3AF"
+                    android:textSize="12sp" />
+
+                <Spinner
+                    android:id="@+id/fpsSpinner"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:background="@drawable/input_bg"
+                    android:layout_marginBottom="8dp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Bitrate (kbps)"
+                    android:textColor="#9CA3AF"
+                    android:textSize="12sp" />
+
+                <EditText
+                    android:id="@+id/bitrateInput"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:text="5000"
+                    android:textColor="#FFFFFF"
+                    android:textColorHint="#4B5563"
+                    android:background="@drawable/input_bg"
+                    android:paddingHorizontal="10dp"
+                    android:inputType="number"
+                    android:singleLine="true"
+                    android:layout_marginBottom="12dp" />
+
+                <Button
+                    android:id="@+id/applyBtn"
+                    android:layout_width="match_parent"
+                    android:layout_height="44dp"
+                    android:text="Apply &amp; Close"
+                    android:textColor="#FFFFFF"
+                    android:backgroundTint="#6366F1" />
+            </LinearLayout>
+        </ScrollView>
+    </FrameLayout>
+
+    <!-- Compact bottom bar: IP + Port + StreamID + GO LIVE -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="40dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingHorizontal="6dp"
+        android:paddingVertical="4dp"
+        android:background="#0D1117">
+
+        <EditText
+            android:id="@+id/ipInput"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="3"
+            android:hint="Hub IP"
+            android:textColor="#FFFFFF"
+            android:textColorHint="#4B5563"
+            android:background="@drawable/input_bg"
+            android:paddingHorizontal="8dp"
+            android:inputType="text"
+            android:singleLine="true"
+            android:textSize="12sp" />
+
+        <EditText
+            android:id="@+id/portInput"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:hint="Port"
+            android:textColor="#FFFFFF"
+            android:textColorHint="#4B5563"
+            android:background="@drawable/input_bg"
+            android:paddingHorizontal="6dp"
+            android:inputType="number"
+            android:singleLine="true"
+            android:textSize="12sp"
+            android:layout_marginHorizontal="4dp" />
+
+        <EditText
+            android:id="@+id/streamInput"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:hint="ID"
+            android:textColor="#FFFFFF"
+            android:textColorHint="#4B5563"
+            android:background="@drawable/input_bg"
+            android:paddingHorizontal="6dp"
+            android:inputType="text"
+            android:singleLine="true"
+            android:textSize="12sp"
+            android:layout_marginEnd="4dp" />
+
+        <Button
+            android:id="@+id/goLiveBtn"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:text="GO LIVE"
+            android:textColor="#FFFFFF"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:backgroundTint="#10B981"
+            android:paddingHorizontal="2dp" />
+    </LinearLayout>
+
+</LinearLayout>

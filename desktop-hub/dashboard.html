@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SRT Camera Hub</title>
+<style>
+  :root {
+    --bg: #0b0f19;
+    --card: #111827;
+    --border: #1e293b;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --green: #10b981;
+    --red: #ef4444;
+    --yellow: #f59e0b;
+    --cyan: #06b6d4;
+    --accent: #6366f1;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  .header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 24px; border-bottom: 1px solid var(--border);
+    background: var(--card);
+    flex-wrap: wrap; gap: 12px;
+  }
+  .header h1 {
+    font-size: 20px; font-weight: 700;
+    background: linear-gradient(135deg, var(--green), var(--cyan));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .status-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .dot.connected { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot.connecting { background: var(--yellow); animation: pulse 0.8s infinite; }
+  .dot.disconnected { background: var(--red); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .ip-bar {
+    display: flex; gap: 16px; flex-wrap: wrap; padding: 12px 24px;
+    font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--border);
+  }
+  .ip-bar span { font-family: monospace; color: var(--text); }
+  .ip-bar button {
+    background: none; border: 1px solid var(--border); color: var(--cyan);
+    padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px;
+  }
+  .ip-bar button:hover { background: var(--border); }
+  main { padding: 24px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 16px;
+  }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px; transition: border-color 0.2s;
+  }
+  .card:hover { border-color: #334155; }
+  .card-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 16px;
+  }
+  .card-name { font-weight: 600; font-size: 15px; }
+  .card-port {
+    font-family: monospace; font-size: 12px; color: var(--muted);
+    background: rgba(255,255,255,0.05); padding: 3px 8px; border-radius: 6px;
+  }
+  .card-actions { display: flex; gap: 8px; margin-bottom: 14px; }
+  .card-actions button, .copy-btn {
+    background: var(--accent); color: #fff; border: none;
+    padding: 6px 14px; border-radius: 8px; cursor: pointer;
+    font-size: 12px; font-weight: 500; white-space: nowrap;
+  }
+  .card-actions button:hover, .copy-btn:hover { opacity: 0.85; }
+  .copy-btn { background: #1e293b; border: 1px solid var(--border); }
+  .control-row {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 10px; font-size: 13px;
+  }
+  .control-row label { color: var(--muted); min-width: 70px; }
+  .control-row input[type=range] {
+    flex: 1; margin: 0 10px; accent-color: var(--accent);
+  }
+  .control-row .val { font-family: monospace; width: 48px; text-align: right; font-size: 12px; }
+  .toggle-row { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+  .toggle {
+    width: 42px; height: 24px; background: var(--border);
+    border-radius: 12px; cursor: pointer; position: relative; transition: background 0.2s;
+  }
+  .toggle.on { background: var(--green); }
+  .toggle::after {
+    content: ''; position: absolute; top: 2px; left: 2px;
+    width: 20px; height: 20px; background: #fff; border-radius: 50%;
+    transition: transform 0.2s;
+  }
+  .toggle.on::after { transform: translateX(18px); }
+  .empty-state {
+    text-align: center; padding: 60px 20px; color: var(--muted);
+  }
+  .empty-state .icon { font-size: 48px; margin-bottom: 16px; opacity: 0.4; }
+  .empty-state p { margin-bottom: 8px; }
+  .empty-state code {
+    background: var(--card); border: 1px solid var(--border);
+    padding: 4px 10px; border-radius: 6px; font-size: 13px; color: var(--cyan);
+  }
+  .toast {
+    position: fixed; bottom: 20px; right: 20px;
+    background: var(--green); color: #000; padding: 10px 20px;
+    border-radius: 8px; font-weight: 600; font-size: 13px;
+    z-index: 999; animation: slideIn 0.3s ease;
+    max-width: 300px;
+  }
+  @keyframes slideIn { from { transform: translateY(20px); opacity: 0; } }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>📡 SRT Camera Hub</h1>
+  <div class="status-row">
+    <span class="dot disconnected" id="statusDot"></span>
+    <span id="statusText">Disconnected</span>
+    <span style="color:var(--muted)">•</span>
+    <span id="camCount">0 cameras</span>
+  </div>
+</div>
+
+<div class="ip-bar" id="ipBar"></div>
+
+<main>
+  <div class="grid" id="grid"></div>
+  <div class="empty-state" id="emptyState">
+    <div class="icon">📷</div>
+    <p>No cameras connected</p>
+    <p>Start the Android app, enter this hub's IP and a port, and tap <strong>GO LIVE</strong></p>
+    <p style="margin-top:12px">SRT listener URL: <code>srt://0.0.0.0:PORT?mode=listener&latency=120000&tlpktdrop=1</code></p>
+  </div>
+</main>
+
+<div id="toastContainer"></div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────────
+let ws = null;
+let connected = false;
+let cameras = {};
+let reconnectTimer = null;
+let reconnectDelay = 1000;
+
+// ── Toast ──────────────────────────────────────────────────────────────────────
+function toast(msg, duration = 2000) {
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = msg;
+  document.getElementById('toastContainer').appendChild(el);
+  setTimeout(() => el.remove(), duration);
+}
+
+// ── Status ─────────────────────────────────────────────────────────────────────
+function setStatus(state) {
+  connected = state === 'connected';
+  const dot = document.getElementById('statusDot');
+  const text = document.getElementById('statusText');
+  dot.className = 'dot ' + state;
+  text.textContent = state === 'connected' ? 'Connected' 
+    : state === 'connecting' ? 'Connecting...' : 'Disconnected';
+}
+
+// ── Render ─────────────────────────────────────────────────────────────────────
+function render() {
+  const ids = Object.keys(cameras);
+  const grid = document.getElementById('grid');
+  const empty = document.getElementById('emptyState');
+  document.getElementById('camCount').textContent = ids.length + ' camera' + (ids.length !== 1 ? 's' : '');
+
+  if (ids.length === 0) {
+    grid.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+
+  empty.style.display = 'none';
+  grid.innerHTML = ids.map(id => {
+    const cam = cameras[id];
+    const srtUrl = `srt://0.0.0.0:${cam.port}?mode=listener&latency=120000&tlpktdrop=1`;
+    return `
+      <div class="card">
+        <div class="card-header">
+          <span class="card-name">📷 ${esc(cam.name || id)}</span>
+          <span class="card-port">:${cam.port}</span>
+        </div>
+
+        <div class="card-actions">
+          <button onclick="copySrt('${esc(srtUrl)}')">📋 Copy SRT URL</button>
+          <button onclick="resetCam('${id}')">🔄 Reset</button>
+        </div>
+
+        ${cam.cameras && cam.cameras.length > 1 ? `
+          <div class="control-row" style="margin-bottom:12px">
+            <label>Camera</label>
+            <select onchange="sendCmd('${id}','select_camera',this.value)" style="flex:1;margin:0 10px;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:12px">
+              ${cam.cameras.map(c => `<option value="${c.id}" ${c.id === cam.activeCameraId ? 'selected' : ''}>${esc(c.name)} (${c.facing})</option>`).join('')}
+            </select>
+          </div>
+        ` : ''}
+
+        <div class="control-row">
+          <label>Zoom</label>
+          <input type="range" min="10" max="100" value="${Math.round((cam.zoom || 1.0) * 10)}" 
+            oninput="this.nextElementSibling.textContent=(this.value/10).toFixed(1)+'x';debounceSend('${id}','zoom',this.value/10)">
+          <span class="val">${(cam.zoom || 1.0).toFixed(1)}x</span>
+        </div>
+
+        <div class="control-row">
+          <label>Exposure</label>
+          <input type="range" min="10" max="200" value="${Math.round((cam.exposure || 1.0) * 100)}"
+            oninput="this.nextElementSibling.textContent=(this.value/100).toFixed(2);debounceSend('${id}','exposure',this.value/100)">
+          <span class="val">${(cam.exposure || 1.0).toFixed(2)}</span>
+        </div>
+
+        <div class="toggle-row">
+          <label style="flex:1;color:var(--muted);font-size:13px">Torch</label>
+          <div class="toggle ${cam.torch ? 'on' : ''}" id="torch_${id}" 
+            onclick="const t=this.classList.toggle('on');sendCmd('${id}','torch',t)"></div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// ── Commands ───────────────────────────────────────────────────────────────────
+function sendCmd(targetId, cmdType, value) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: 'cmd', targetId, command: { type: cmdType, value } }));
+}
+
+const debounceTimers = {};
+function debounceSend(targetId, cmdType, value) {
+  clearTimeout(debounceTimers[targetId + cmdType]);
+  debounceTimers[targetId + cmdType] = setTimeout(() => sendCmd(targetId, cmdType, value), 100);
+}
+
+function copySrt(url) {
+  navigator.clipboard.writeText(url).then(() => toast('SRT URL copied!'));
+}
+
+function resetCam(id) {
+  sendCmd(id, 'zoom', 1.0);
+  sendCmd(id, 'exposure', 1.0);
+  sendCmd(id, 'torch', false);
+  toast('Reset sent');
+}
+
+// ── WebSocket ──────────────────────────────────────────────────────────────────
+function connect() {
+  if (ws && ws.readyState === WebSocket.OPEN) return;
+  
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const url = `${proto}//${location.host}`;
+  
+  setStatus('connecting');
+  try {
+    ws = new WebSocket(url);
+  } catch(e) {
+    scheduleReconnect();
+    return;
+  }
+
+  ws.onopen = () => {
+    setStatus('connected');
+    reconnectDelay = 1000;
+    ws.send(JSON.stringify({ type: 'director' }));
+  };
+
+  ws.onmessage = (e) => {
+    let pkt;
+    try { pkt = JSON.parse(e.data); } catch { return; }
+
+    if (pkt.type === 'guest_list' && Array.isArray(pkt.guests)) {
+      const next = {};
+      pkt.guests.forEach(g => {
+        next[g.id] = {
+          ...cameras[g.id],
+          id: g.id,
+          port: g.port,
+          name: cameras[g.id]?.name || g.id,
+          cameras: g.cameras,
+          activeCameraId: g.activeCameraId,
+        };
+      });
+      cameras = next;
+      render();
+    } else if (pkt.type === 'error') {
+      toast('⚠ ' + pkt.message, 3000);
+    }
+  };
+
+  ws.onclose = () => {
+    setStatus('disconnected');
+    ws = null;
+    scheduleReconnect();
+  };
+
+  ws.onerror = () => {};
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+  reconnectTimer = setTimeout(connect, reconnectDelay);
+}
+
+// ── IP bar ─────────────────────────────────────────────────────────────────────
+function fetchIPs() {
+  fetch('/api/ips')
+    .then(r => r.json())
+    .then(d => {
+      const bar = document.getElementById('ipBar');
+      const parts = [];
+      if (d.localIps && d.localIps.length) {
+        parts.push(`Local: <span>${d.localIps[0]}</span> <button onclick="copyText('${d.localIps[0]}')">copy</button>`);
+      }
+      if (d.tailscaleIp) {
+        parts.push(`Tailscale: <span>${d.tailscaleIp}</span> <button onclick="copyText('${d.tailscaleIp}')">copy</button>`);
+      }
+      parts.push(`Port: <span>${d.wsPort}</span>`);
+      bar.innerHTML = parts.join(' &nbsp;│&nbsp; ');
+    })
+    .catch(() => {});
+}
+
+function copyText(t) {
+  navigator.clipboard.writeText(t).then(() => toast('Copied: ' + t));
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────────
+connect();
+fetchIPs();
+setInterval(fetchIPs, 30000);
+</script>
+</body>
+</html>

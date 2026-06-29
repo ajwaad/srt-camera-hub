@@ -1,0 +1,30 @@
+# Android
+.gradle/
+.idea/
+build/
+local.properties
+*.apk
+*.aab
+
+# C / C++ / OBS
+compile_commands.json
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.o
+*.obj
+*.dll
+*.so
+*.dylib
+*.exe
+/releases/
+
+# Node
+node_modules/
+dist/
+.npm/
+
+# System
+.DS_Store
+Thumbs.db
