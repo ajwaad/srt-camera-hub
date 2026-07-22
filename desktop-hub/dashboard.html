@@ -188,7 +188,8 @@ function render() {
   empty.style.display = 'none';
   grid.innerHTML = ids.map(id => {
     const cam = cameras[id];
-    const srtUrl = `srt://0.0.0.0:${cam.port}?mode=listener&latency=120000&tlpktdrop=1`;
+    const srtUrl = `srt://0.0.0.0:${cam.port}?mode=listener&tlpktdrop=1`;
+    const tally = cam.tally || "OFF AIR";
     return `
       <div class="card">
         <div class="card-header">
@@ -196,9 +197,16 @@ function render() {
           <span class="card-port">:${cam.port}</span>
         </div>
 
-        <div class="card-actions">
+        <div class="card-actions" style="margin-bottom:8px">
           <button onclick="copySrt('${esc(srtUrl)}')">📋 Copy SRT URL</button>
           <button onclick="resetCam('${id}')">🔄 Reset</button>
+        </div>
+
+        <div class="control-row" style="margin-bottom:12px;gap:6px">
+          <label style="min-width:45px">Tally</label>
+          <button style="flex:1;padding:4px;font-size:11px;background:${tally==='ON AIR'?'#ef4444':'#1e293b'};color:#fff;border:1px solid var(--border);border-radius:6px;cursor:pointer" onclick="setTally('${id}','ON AIR')">ON AIR</button>
+          <button style="flex:1;padding:4px;font-size:11px;background:${tally==='BACKSTAGE'?'#f59e0b':'#1e293b'};color:#fff;border:1px solid var(--border);border-radius:6px;cursor:pointer" onclick="setTally('${id}','BACKSTAGE')">STAGE</button>
+          <button style="flex:1;padding:4px;font-size:11px;background:${tally==='OFF AIR'?'#64748b':'#1e293b'};color:#fff;border:1px solid var(--border);border-radius:6px;cursor:pointer" onclick="setTally('${id}','OFF AIR')">OFF</button>
         </div>
 
         ${cam.cameras && cam.cameras.length > 1 ? `
@@ -232,6 +240,11 @@ function render() {
       </div>
     `;
   }).join('');
+}
+
+function setTally(targetId, state) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: 'set_tally', targetId, tally: state }));
 }
 
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
@@ -325,13 +338,25 @@ function fetchIPs() {
     .then(d => {
       const bar = document.getElementById('ipBar');
       const parts = [];
-      if (d.localIps && d.localIps.length) {
-        parts.push(`Local: <span>${d.localIps[0]}</span> <button onclick="copyText('${d.localIps[0]}')">copy</button>`);
+      if (d.lanIps && d.lanIps.length) {
+        d.lanIps.forEach(ip => {
+          parts.push(`LAN/Ethernet: <span>${ip}</span> <button onclick="copyText('${ip}')">copy</button>`);
+        });
+      }
+      if (d.wifiIps && d.wifiIps.length) {
+        d.wifiIps.forEach(ip => {
+          parts.push(`Wi-Fi: <span>${ip}</span> <button onclick="copyText('${ip}')">copy</button>`);
+        });
+      }
+      if (!parts.length && d.allIps && d.allIps.length) {
+        d.allIps.forEach(ip => {
+          parts.push(`IP: <span>${ip}</span> <button onclick="copyText('${ip}')">copy</button>`);
+        });
       }
       if (d.tailscaleIp) {
         parts.push(`Tailscale: <span>${d.tailscaleIp}</span> <button onclick="copyText('${d.tailscaleIp}')">copy</button>`);
       }
-      parts.push(`Port: <span>${d.wsPort}</span>`);
+      parts.push(`WebSocket Port: <span>${d.wsPort}</span>`);
       bar.innerHTML = parts.join(' &nbsp;│&nbsp; ');
     })
     .catch(() => {});

@@ -205,6 +205,18 @@ try {
   success = false;
 }
 
+// Configure Windows Firewall
+console.log('Configuring Windows Firewall rules...');
+try {
+  execSync('netsh advfirewall firewall delete rule name="SRT Camera Hub Signaling" 2>nul', { stdio: 'pipe' });
+  execSync('netsh advfirewall firewall delete rule name="SRT Camera Hub Media" 2>nul', { stdio: 'pipe' });
+  execSync('netsh advfirewall firewall add rule name="SRT Camera Hub Signaling" dir=in action=allow protocol=TCP localport=3001 profile=any enable=yes', { stdio: 'pipe' });
+  execSync('netsh advfirewall firewall add rule name="SRT Camera Hub Media" dir=in action=allow protocol=UDP localport=8000-9000 profile=any enable=yes', { stdio: 'pipe' });
+  console.log('  [OK] Firewall rules added (Private & Public networks unlocked for LAN/Wi-Fi)');
+} catch (e) {
+  console.log('  [NOTE] Firewall rules skipped or failed: ' + e.message);
+}
+
 console.log('');
 if (success) {
   console.log('Installation complete!');

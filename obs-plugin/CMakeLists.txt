@@ -25,6 +25,9 @@ target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE
     FFmpeg::avutil
     FFmpeg::swscale
 )
+if(WIN32)
+    target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE winhttp)
+endif()
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${FFmpeg_INCLUDE_DIRS}
 )

@@ -22,14 +22,14 @@ const { WebSocketServer, WebSocket } = require("ws");
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT, 10) || 3001;
-const HEARTBEAT_MS = 20_000;
-const STALE_TIMEOUT_MS = 45_000; // must exceed HEARTBEAT_MS
+const HEARTBEAT_MS = 3_000;      // Fast 3s heartbeat ping
+const STALE_TIMEOUT_MS = 6_000;  // Quick 6s stale eviction
 const MAX_CAMERAS = 20;
 const MAX_DIRECTORS = 10;
-const RATE_LIMIT = 30; // messages per window
+const RATE_LIMIT = 60; // messages per window
 const RATE_WINDOW_MS = 2000;
 
-// ── State ─────────────────────────────────────────────────────────────────────
+// ── Cache & State ─────────────────────────────────────────────────────────────
 const cameras = new Map(); // id -> { ws, port, cameras[], activeCameraId, registeredAt }
 const directors = new Map(); // id -> ws
 const usedPorts = new Map(); // port -> cameraId
@@ -37,6 +37,9 @@ const heartbeats = new Map(); // cameraId -> timestamp
 const rateState = new Map(); // ws -> { count, windowStart }
 
 let directorCounter = 0;
+let cachedGuestListJson = null;
+let cachedIpsJson = null;
+let cachedIpsTs = 0;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function safeStr(val, fallback = "") {
@@ -51,26 +54,47 @@ function safePort(val, fallback = 0) {
 }
 
 function detectIPs() {
-  const ips = { local: [], tailscale: null };
+  const now = Date.now();
+  if (cachedIpsJson && now - cachedIpsTs < 5000) return cachedIpsJson;
+  const ips = { lan: [], wifi: [], tailscale: null, all: [] };
   const ifaces = os.networkInterfaces();
-  for (const [, addrs] of Object.entries(ifaces)) {
+  for (const [name, addrs] of Object.entries(ifaces)) {
     if (!addrs) continue;
     for (const a of addrs) {
       if (a.family === "IPv4" && !a.internal) {
-        if (a.address.startsWith("100.")) ips.tailscale = a.address;
-        else if (/^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(a.address))
-          ips.local.push(a.address);
+        ips.all.push(a.address);
+        const lower = name.toLowerCase();
+        if (a.address.startsWith("100.")) {
+          ips.tailscale = a.address;
+        } else if (lower.includes("wi-fi") || lower.includes("wlan") || lower.includes("wireless") || lower.includes("wifi")) {
+          ips.wifi.push(a.address);
+        } else {
+          ips.lan.push(a.address);
+        }
       }
     }
   }
+  cachedIpsJson = ips;
+  cachedIpsTs = now;
   return ips;
 }
 
+function invalidateCaches() {
+  cachedGuestListJson = null;
+}
+
 function broadcast(msg) {
-  const data = JSON.stringify(msg);
+  const data = typeof msg === "string" ? msg : JSON.stringify(msg);
   for (const ws of directors.values()) {
     if (ws.readyState === WebSocket.OPEN) ws.send(data);
   }
+}
+
+function broadcastGuestList() {
+  if (!cachedGuestListJson) {
+    cachedGuestListJson = JSON.stringify({ type: "guest_list", guests: guestList() });
+  }
+  broadcast(cachedGuestListJson);
 }
 
 function guestList() {
@@ -81,26 +105,32 @@ function guestList() {
       port: cam.port,
       cameras: cam.cameras,
       activeCameraId: cam.activeCameraId,
+      tally: cam.tally || "OFF AIR",
+      lossPct: cam.lossPct || 0,
+      rttMs: cam.rttMs || 0,
+      targetBitrate: cam.targetBitrate || 5000,
     });
   }
   return guests;
 }
 
-// ── HTTP server ───────────────────────────────────────────────────────────────
+// ── HTTP server (with in-memory file cache) ───────────────────────────────────
 const DASHBOARD_HTML = path.join(__dirname, "dashboard.html");
+let DASHBOARD_CACHE = null;
+
+function getDashboardHtml() {
+  if (!DASHBOARD_CACHE && fs.existsSync(DASHBOARD_HTML)) {
+    DASHBOARD_CACHE = fs.readFileSync(DASHBOARD_HTML, "utf8");
+  }
+  return DASHBOARD_CACHE || `<!doctype html><meta charset=utf-8><title>SRT Hub</title><h1>SRT Camera Hub</h1>`;
+}
 
 const server = http.createServer((req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
 
   if (req.method === "GET" && (req.url === "/" || req.url === "/dashboard")) {
-    if (fs.existsSync(DASHBOARD_HTML)) {
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      res.end(fs.readFileSync(DASHBOARD_HTML, "utf8"));
-    } else {
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      res.end(`<!doctype html><meta charset=utf-8><title>SRT Hub</title>
-<h1>SRT Camera Hub</h1><p>Dashboard not found. Place dashboard.html in this directory.</p>`);
-    }
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(getDashboardHtml());
     return;
   }
 
@@ -108,13 +138,54 @@ const server = http.createServer((req, res) => {
     const ips = detectIPs();
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({
-      localIps: ips.local,
+      lanIps: ips.lan,
+      wifiIps: ips.wifi,
+      allIps: ips.all,
       tailscaleIp: ips.tailscale,
       wsPort: PORT,
       cameras: cameras.size,
       directors: directors.size,
       uptime: Math.floor(process.uptime()),
     }));
+    return;
+  }
+
+  if (req.method === "GET" && req.url.startsWith("/api/tally")) {
+    const urlObj = new URL(req.url, `http://localhost:${PORT}`);
+    const id = urlObj.searchParams.get("id");
+    const port = urlObj.searchParams.get("port");
+    let rawState = (urlObj.searchParams.get("state") || "OFF AIR").toUpperCase();
+    if (rawState === "STAGE" || rawState === "ON STAGE") rawState = "BACKSTAGE";
+    const state = rawState;
+
+    let targetCam = null;
+    let targetId = id;
+
+    if (id && cameras.has(id)) {
+      targetCam = cameras.get(id);
+    } else if (port) {
+      const p = Number(port);
+      for (const [cId, cam] of cameras) {
+        if (cam.port === p) {
+          targetCam = cam;
+          targetId = cId;
+          break;
+        }
+      }
+    }
+
+    if (targetCam) {
+      targetCam.tally = state;
+      if (targetCam.ws && targetCam.ws.readyState === WebSocket.OPEN) {
+        targetCam.ws.send(JSON.stringify({ type: "tally", state }));
+      }
+      broadcast({ type: "guest_list", guests: guestList() });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: true, id: targetId, tally: state }));
+    } else {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "camera not found" }));
+    }
     return;
   }
 
@@ -211,16 +282,19 @@ wss.on("connection", (ws) => {
 
       const activeCamId = safeStr(pkt.activeCameraId, camList[0]?.id || "0");
 
+      const existingTally = old ? (old.tally || "OFF AIR") : "OFF AIR";
       clientId = id;
       isCamera = true;
-      cameras.set(id, { ws, port, cameras: camList, activeCameraId: activeCamId, registeredAt: Date.now() });
+      cameras.set(id, { ws, port, cameras: camList, activeCameraId: activeCamId, tally: existingTally, registeredAt: Date.now() });
       usedPorts.set(port, id);
       heartbeats.set(id, Date.now());
 
-      console.log(`[cam] ${id} on port ${port} (total: ${cameras.size})`);
+      console.log(`[cam] ${id} on port ${port} (tally: ${existingTally}, total: ${cameras.size})`);
       ws.send(JSON.stringify({ type: "welcome", id, port }));
+      ws.send(JSON.stringify({ type: "tally", state: existingTally }));
 
-      broadcast({ type: "guest_list", guests: guestList() });
+      invalidateCaches();
+      broadcastGuestList();
       return;
     }
 
@@ -236,11 +310,29 @@ wss.on("connection", (ws) => {
       console.log(`[dir] ${clientId} joined (total: ${directors.size})`);
 
       // Send current state
-      ws.send(JSON.stringify({ type: "guest_list", guests: guestList() }));
+      invalidateCaches();
+      ws.send(cachedGuestListJson || JSON.stringify({ type: "guest_list", guests: guestList() }));
       return;
     }
 
     // ── Camera command (director → camera) ──────────────────────────────────
+    if (pkt.type === "set_tally") {
+      const targetId = safeStr(pkt.targetId);
+      let rawState = (pkt.tally || "OFF AIR").toUpperCase();
+      if (rawState === "STAGE" || rawState === "ON STAGE") rawState = "BACKSTAGE";
+      const state = rawState;
+      const target = targetId ? cameras.get(targetId) : null;
+      if (target) {
+        target.tally = state;
+        if (target.ws && target.ws.readyState === WebSocket.OPEN) {
+          target.ws.send(JSON.stringify({ type: "tally", state }));
+        }
+        invalidateCaches();
+        broadcastGuestList();
+      }
+      return;
+    }
+
     if (pkt.type === "cmd" && isDirector) {
       const targetId = safeStr(pkt.targetId);
       const target = targetId ? cameras.get(targetId) : null;
@@ -262,7 +354,36 @@ wss.on("connection", (ws) => {
       const cam = cameras.get(clientId);
       if (cam && pkt.activeCameraId) {
         cam.activeCameraId = safeStr(pkt.activeCameraId, cam.activeCameraId);
-        broadcast({ type: "guest_list", guests: guestList() });
+        invalidateCaches();
+        broadcastGuestList();
+      }
+      return;
+    }
+
+    // ── Telemetry & ABR Control (camera → hub) ─────────────────────────────
+    if (pkt.type === "telemetry" && isCamera) {
+      const cam = cameras.get(clientId);
+      if (cam) {
+        cam.lossPct = Number(pkt.lossPct) || 0;
+        cam.rttMs = Number(pkt.rttMs) || 0;
+        cam.droppedFrames = Number(pkt.droppedFrames) || 0;
+
+        // Adaptive Bitrate Logic: Adjust encoder bitrate on congestion / recovery
+        if (cam.lossPct > 3.0 || cam.rttMs > 250) {
+          const newBitrate = Math.max(1500, Math.floor((cam.targetBitrate || 5000) * 0.75));
+          if (newBitrate !== cam.targetBitrate) {
+            cam.targetBitrate = newBitrate;
+            ws.send(JSON.stringify({ type: "abr_adjust", bitrate: newBitrate }));
+          }
+        } else if (cam.lossPct < 0.5 && cam.rttMs < 100) {
+          const newBitrate = Math.min(8000, Math.floor((cam.targetBitrate || 5000) * 1.1));
+          if (newBitrate !== cam.targetBitrate) {
+            cam.targetBitrate = newBitrate;
+            ws.send(JSON.stringify({ type: "abr_adjust", bitrate: newBitrate }));
+          }
+        }
+        invalidateCaches();
+        broadcastGuestList();
       }
       return;
     }
@@ -332,7 +453,8 @@ setInterval(() => {
 server.listen(PORT, () => {
   const ips = detectIPs();
   console.log(`\n  SRT Camera Hub ready on http://0.0.0.0:${PORT}`);
-  if (ips.local.length) console.log(`  Local:  http://${ips.local[0]}:${PORT}`);
+  if (ips.lan.length) console.log(`  LAN:    http://${ips.lan[0]}:${PORT}`);
+  if (ips.wifi.length) console.log(`  Wi-Fi:  http://${ips.wifi[0]}:${PORT}`);
   if (ips.tailscale) console.log(`  TS:     http://${ips.tailscale}:${PORT}`);
   console.log("");
 });

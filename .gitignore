@@ -3,8 +3,6 @@
 .idea/
 build/
 local.properties
-*.apk
-*.aab
 
 # C / C++ / OBS
 compile_commands.json
@@ -14,11 +12,10 @@ cmake_install.cmake
 Makefile
 *.o
 *.obj
-*.dll
 *.so
 *.dylib
-*.exe
-/releases/
+build_x64/
+.deps/
 
 # Node
 node_modules/
@@ -28,3 +25,4 @@ dist/
 # System
 .DS_Store
 Thumbs.db
+

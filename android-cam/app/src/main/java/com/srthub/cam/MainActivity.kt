@@ -54,6 +54,7 @@ class MainActivity : AppCompatActivity(), ConnectChecker, SurfaceHolder.Callback
     private lateinit var flipHSwitch: androidx.appcompat.widget.SwitchCompat
     private lateinit var controlsBody: View
     private lateinit var controlsHandle: TextView
+    private lateinit var tallyBadge: TextView
 
     // State
     private var srtCamera: SrtCamera2? = null
@@ -75,6 +76,7 @@ class MainActivity : AppCompatActivity(), ConnectChecker, SurfaceHolder.Callback
             setupSpinners()
             loadPrefs()
             wireButtons()
+            registerNetworkMonitor()
             onCreateDone = true
             // Only now allow surface callbacks to trigger camera init
             glView.holder.addCallback(this)
@@ -106,6 +108,28 @@ class MainActivity : AppCompatActivity(), ConnectChecker, SurfaceHolder.Callback
         flipHSwitch = findViewById(R.id.flipHSwitch)
         controlsBody = findViewById(R.id.controlsBody)
         controlsHandle = findViewById(R.id.controlsHandle)
+        tallyBadge = findViewById(R.id.tallyBadge)
+    }
+
+    private fun updateTallyState(state: String) {
+        val upper = state.uppercase()
+        when (upper) {
+            "ON AIR" -> {
+                tallyBadge.text = "ON AIR"
+                tallyBadge.setBackgroundColor(Color.parseColor("#DC2626")) // Bright Red
+                tallyBadge.setTextColor(Color.WHITE)
+            }
+            "BACKSTAGE", "STAGE", "ON STAGE" -> {
+                tallyBadge.text = "BACKSTAGE"
+                tallyBadge.setBackgroundColor(Color.parseColor("#D97706")) // Amber/Yellow
+                tallyBadge.setTextColor(Color.WHITE)
+            }
+            else -> { // OFF AIR
+                tallyBadge.text = "OFF AIR"
+                tallyBadge.setBackgroundColor(Color.parseColor("#AA374151")) // Dim Dark Gray
+                tallyBadge.setTextColor(Color.parseColor("#D1D5DB"))
+            }
+        }
     }
 
     private fun setupSpinners() {
@@ -400,8 +424,18 @@ class MainActivity : AppCompatActivity(), ConnectChecker, SurfaceHolder.Callback
             cameraId = streamId,
             srtPort = endpoint.port,
             onCommand = { type, value -> handleHubCommand(type, value) },
+            onTally = { state -> updateTallyState(state) },
             getCameraList = { getCamerasListForHub() },
-            getActiveCameraId = { getSelectedCameraId() }
+            getActiveCameraId = { getSelectedCameraId() },
+            fallbackHosts = listOf(endpoint.host, "127.0.0.1"),
+            onBitrateAdjustmentRequested = { targetKbps ->
+                try {
+                    srtCamera?.setVideoBitrateOnFly(targetKbps * 1000)
+                    Log.i(TAG, "ABR adjusted bitrate to ${targetKbps} kbps")
+                } catch (e: Exception) {
+                    Log.e(TAG, "ABR bitrate change failed", e)
+                }
+            }
         ).apply { connect() }
 
         isStreaming = true
@@ -624,9 +658,41 @@ class MainActivity : AppCompatActivity(), ConnectChecker, SurfaceHolder.Callback
         return null
     }
 
+    private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
+
+    private fun registerNetworkMonitor() {
+        try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            val builder = android.net.NetworkRequest.Builder()
+            networkCallback = object : android.net.ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: android.net.Network) {
+                    Log.i(TAG, "Network interface available: $network")
+                    if (isStreaming) {
+                        handler.post { hubClient?.connect() }
+                    }
+                }
+                override fun onLost(network: android.net.Network) {
+                    Log.w(TAG, "Network interface lost: $network")
+                    if (isStreaming) {
+                        handler.post { hubClient?.connect() }
+                    }
+                }
+            }
+            cm.registerNetworkCallback(builder.build(), networkCallback!!)
+        } catch (e: Exception) {
+            Log.e(TAG, "Network monitor register failed", e)
+        }
+    }
+
     // ── Lifecycle ───────────────────────────────────────────────────────────
     override fun onDestroy() {
         super.onDestroy()
+        networkCallback?.let {
+            try {
+                (getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager)
+                    .unregisterNetworkCallback(it)
+            } catch (_: Exception) {}
+        }
         try { hubClient?.disconnect() } catch (_: Throwable) {}
         try { srtCamera?.stopStream() } catch (_: Throwable) {}
         try { srtCamera?.stopPreview() } catch (_: Throwable) {}

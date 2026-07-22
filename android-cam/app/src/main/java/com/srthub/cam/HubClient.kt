@@ -22,32 +22,43 @@ class HubClient(
     private val cameraId: String,
     private val srtPort: Int,
     private val onCommand: (type: String, value: Any) -> Unit,
+    private val onTally: (state: String) -> Unit,
     private val getCameraList: () -> List<Triple<String, String, String>>, // (id, name, facing)
-    private val getActiveCameraId: () -> String
+    private val getActiveCameraId: () -> String,
+    private val fallbackHosts: List<String> = emptyList(),
+    private val onBitrateAdjustmentRequested: ((targetBitrateKbps: Int) -> Unit)? = null
 ) {
     companion object {
         private const val TAG = "HubClient"
-        private const val PING_MS = 25_000L
+        private const val PING_MS = 10_000L
+        private const val FAST_RECONNECT_MS = 500L
     }
 
     private val client = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
+        .connectTimeout(800, TimeUnit.MILLISECONDS)
         .build()
 
     private var ws: WebSocket? = null
     private var destroyed = false
-    private var reconnectDelay = 1_000L
+    private var reconnectDelay = FAST_RECONNECT_MS
+    private var currentHostIndex = 0
+    private val allHosts: List<String> get() = (listOf(hubHost) + fallbackHosts).distinct()
+
     private val handler = Handler(Looper.getMainLooper())
     private val pingExecutor = java.util.concurrent.ScheduledThreadPoolExecutor(1)
     private var pingTask: java.util.concurrent.ScheduledFuture<*>? = null
 
     fun connect() {
         if (destroyed) return
-        val req = Request.Builder().url("ws://$hubHost:$hubPort").build()
+        val host = allHosts.getOrElse(currentHostIndex) { hubHost }
+        val req = Request.Builder().url("ws://$host:$hubPort").build()
+        Log.i(TAG, "Connecting to hub at ws://$host:$hubPort (target #$currentHostIndex)")
+
         ws = client.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.i(TAG, "Connected to hub")
-                reconnectDelay = 1_000L
+                Log.i(TAG, "Connected to hub at $host")
+                reconnectDelay = FAST_RECONNECT_MS
                 register(webSocket)
                 startPing(webSocket)
             }
@@ -57,6 +68,14 @@ class HubClient(
                     val obj = JSONObject(text)
                     val type = obj.optString("type")
                     when (type) {
+                        "tally" -> {
+                            val state = obj.optString("state", "OFF AIR")
+                            handler.post { onTally(state) }
+                        }
+                        "abr_adjust" -> {
+                            val targetKbps = obj.optInt("bitrate", 3000)
+                            handler.post { onBitrateAdjustmentRequested?.invoke(targetKbps) }
+                        }
                         "zoom", "torch", "exposure", "select_camera" -> {
                             val value: Any = when (type) {
                                 "torch" -> obj.optBoolean("value", false)
@@ -74,14 +93,25 @@ class HubClient(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.e(TAG, "WS failure: ${t.message}")
-                scheduleReconnect()
+                Log.e(TAG, "WS failure at $host: ${t.message}")
+                rotateHostAndReconnect()
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                if (code != 1000) scheduleReconnect()
+                if (code != 1000) rotateHostAndReconnect()
             }
         })
+    }
+
+    private fun rotateHostAndReconnect() {
+        if (destroyed) return
+        val hosts = allHosts
+        if (hosts.isNotEmpty()) {
+            currentHostIndex = (currentHostIndex + 1) % hosts.size
+        }
+        val delay = reconnectDelay
+        reconnectDelay = minOf(delay * 2, 5_000L)
+        handler.postDelayed({ connect() }, delay)
     }
 
     private fun register(webSocket: WebSocket) {
@@ -110,6 +140,16 @@ class HubClient(
         }.toString())
     }
 
+    fun sendStats(lossPct: Float, rttMs: Int, droppedFrames: Long) {
+        ws?.send(JSONObject().apply {
+            put("type", "telemetry")
+            put("id", cameraId)
+            put("lossPct", lossPct)
+            put("rttMs", rttMs)
+            put("droppedFrames", droppedFrames)
+        }.toString())
+    }
+
     private fun startPing(webSocket: WebSocket) {
         pingTask?.cancel(true)
         pingTask = pingExecutor.scheduleAtFixedRate({
@@ -118,13 +158,6 @@ class HubClient(
                 webSocket.send("{\"type\":\"ping\",\"t\":${System.currentTimeMillis()}}")
             } catch (_: Exception) {}
         }, PING_MS, PING_MS, TimeUnit.MILLISECONDS)
-    }
-
-    private fun scheduleReconnect() {
-        if (destroyed) return
-        val delay = reconnectDelay
-        reconnectDelay = minOf(delay * 2, 30_000L)
-        handler.postDelayed({ connect() }, delay)
     }
 
     fun disconnect() {

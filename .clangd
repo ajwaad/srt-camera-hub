@@ -1,0 +1,12 @@
+CompileFlags:
+  Add:
+    - "-D_WIN32"
+    - "-I./obs-plugin/src"
+    - "-I./obs-plugin/.deps/include"
+    - "-IC:/Users/AMAL/Downloads/Downloads (20 July 2026)/srt-camera-hub-main/obs-plugin/.deps/include"
+    - "-I./obs-plugin/.deps/obs-deps-2025-07-11-x64/include"
+    - "-IC:/Users/AMAL/Downloads/Downloads (20 July 2026)/srt-camera-hub-main/obs-plugin/.deps/obs-deps-2025-07-11-x64/include"
+
+Diagnostics:
+  Suppress:
+    - "pp_file_not_found"

@@ -18,6 +18,8 @@ Fix notes (v1.1):
   - Proper thread lifecycle management.
 */
 
+#include <stdbool.h>
+#include <stdint.h>
 #include <obs-module.h>
 #include <plugin-support.h>
 #include <util/threading.h>
@@ -44,8 +46,8 @@ Fix notes (v1.1):
 #define SETTING_RECONNECT "reconnect"
 
 #define DEFAULT_LATENCY   120000   /* microseconds = 120ms */
-#define RECONNECT_DELAY_MS 2000
-#define MAX_RECONNECT_RETRIES 10
+#define RECONNECT_DELAY_MS 250
+#define MAX_RECONNECT_RETRIES 20
 
 #define blog(level, fmt, ...) \
 	blog(level, "[srt-source] " fmt, ##__VA_ARGS__)
@@ -69,7 +71,7 @@ struct srt_source_context {
 	int              last_sws_src_h;
 	int              last_sws_dst_w;
 	int              last_sws_dst_h;
-	enum AVPixelFormat last_sws_pix_fmt;
+	int              last_sws_pix_fmt;
 
 	/* Threading */
 	pthread_t        decode_thread;
@@ -101,9 +103,164 @@ static obs_properties_t *srt_source_get_properties(void *data);
 static void  srt_source_update(void *data, obs_data_t *settings);
 static void  srt_source_activate(void *data);
 static void  srt_source_deactivate(void *data);
+static void  srt_source_show(void *data);
+static void  srt_source_hide(void *data);
 static void  srt_source_video_tick(void *data, float seconds);
 static uint32_t srt_source_get_width(void *data);
 static uint32_t srt_source_get_height(void *data);
+
+/* ── WinHTTP Tally Notification Helper ──────────────────────────────────────── */
+
+#ifdef _WIN32
+#include <windows.h>
+#include <winhttp.h>
+
+struct tally_async_args {
+	char host[128];
+	int hub_port;
+	int srt_port;
+	char state[32];
+};
+
+static void execute_winhttp_tally(const char *host_str, int hub_port, int srt_port, const char *state_str)
+{
+	HINTERNET hSession = WinHttpOpen(L"SRT-Camera-Hub-OBS-Plugin/1.0",
+					 WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+					 WINHTTP_NO_PROXY_NAME,
+					 WINHTTP_NO_PROXY_BYPASS, 0);
+	if (!hSession)
+		return;
+
+	wchar_t wHost[128] = {0};
+	MultiByteToWideChar(CP_UTF8, 0, host_str, -1, wHost, 128);
+
+	wchar_t wState[32] = {0};
+	MultiByteToWideChar(CP_UTF8, 0, state_str, -1, wState, 32);
+
+	HINTERNET hConnect = WinHttpConnect(hSession, wHost, (INTERNET_PORT)hub_port, 0);
+	if (hConnect) {
+		wchar_t wPath[256] = {0};
+		swprintf_s(wPath, 256, L"/api/tally?port=%d&state=%s", srt_port, wState);
+
+		HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", wPath, NULL,
+							 WINHTTP_NO_REFERER,
+							 WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+		if (hRequest) {
+			WinHttpSetTimeouts(hRequest, 1000, 1000, 1000, 1000);
+			WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+					   WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+			WinHttpReceiveResponse(hRequest, NULL);
+			WinHttpCloseHandle(hRequest);
+		}
+		WinHttpCloseHandle(hConnect);
+	}
+	WinHttpCloseHandle(hSession);
+}
+
+static DWORD WINAPI send_tally_http_thread(LPVOID param)
+{
+	struct tally_async_args *args = (struct tally_async_args *)param;
+	if (!args)
+		return 0;
+
+	execute_winhttp_tally(args->host, args->hub_port, args->srt_port, args->state);
+
+	if (strcmp(args->host, "127.0.0.1") != 0) {
+		execute_winhttp_tally("127.0.0.1", args->hub_port, args->srt_port, args->state);
+	}
+
+	free(args);
+	return 0;
+}
+
+static void parse_srt_url_host_and_port(const char *url, char *host, size_t host_size, int *port)
+{
+	if (!url || !host || host_size == 0 || !port)
+		return;
+
+	*port = 0;
+	strncpy(host, "127.0.0.1", host_size - 1);
+	host[host_size - 1] = '\0';
+
+	const char *p = url;
+	if (strncmp(p, "srt://", 6) == 0)
+		p += 6;
+
+	const char *colon = strchr(p, ':');
+	if (!colon)
+		return;
+
+	size_t host_len = colon - p;
+	if (host_len > 0 && host_len < host_size) {
+		memcpy(host, p, host_len);
+		host[host_len] = '\0';
+	}
+
+	*port = atoi(colon + 1);
+
+	if (strcmp(host, "0.0.0.0") == 0 || strcmp(host, "::") == 0 || strlen(host) == 0) {
+		strncpy(host, "127.0.0.1", host_size - 1);
+		host[host_size - 1] = '\0';
+	}
+}
+
+static void notify_hub_tally(const char *srt_url, const char *state)
+{
+	if (!srt_url || strlen(srt_url) == 0)
+		return;
+
+	char host[128] = "127.0.0.1";
+	int srt_port = 0;
+	parse_srt_url_host_and_port(srt_url, host, sizeof(host), &srt_port);
+	if (srt_port <= 0)
+		return;
+
+	struct tally_async_args *args = (struct tally_async_args *)calloc(1, sizeof(struct tally_async_args));
+	if (!args)
+		return;
+
+	strncpy(args->host, host, sizeof(args->host) - 1);
+	args->hub_port = 3001;
+	args->srt_port = srt_port;
+	strncpy(args->state, state, sizeof(args->state) - 1);
+
+	HANDLE hThread = CreateThread(NULL, 0, send_tally_http_thread, args, 0, NULL);
+	if (hThread) {
+		CloseHandle(hThread);
+	} else {
+		free(args);
+	}
+}
+#else
+static void notify_hub_tally(const char *srt_url, const char *state)
+{
+	(void)srt_url;
+	(void)state;
+}
+#endif
+
+static void update_source_tally(struct srt_source_context *ctx)
+{
+	if (!ctx || !ctx->source || !ctx->srt_url)
+		return;
+
+	bool active = obs_source_active(ctx->source);
+	bool showing = obs_source_showing(ctx->source);
+
+	const char *state = "OFF AIR";
+	if (active) {
+		state = "ON AIR";
+	} else if (showing) {
+		state = "BACKSTAGE";
+	} else {
+		state = "OFF AIR";
+	}
+
+	blog(LOG_INFO, "Tally state update: active=%s, showing=%s -> state=%s (url=%s)",
+	     active ? "yes" : "no", showing ? "yes" : "no", state, ctx->srt_url);
+
+	notify_hub_tally(ctx->srt_url, state);
+}
 
 /* ── FFmpeg init and cleanup ────────────────────────────────────────────────── */
 
@@ -152,15 +309,33 @@ static int open_srt_stream(struct srt_source_context *ctx)
 	av_dict_set(&opts, "fflags", "nobuffer", 0);
 	av_dict_set(&opts, "flags", "low_delay", 0);
 
+	/* Construct final URL with latency setting from slider (ctx->latency_us is in ms) */
+	char final_url[1024];
+	int latency_us = (ctx->latency_us >= 0) ? (ctx->latency_us * 1000) : 120000;
+	if (!ctx->srt_url || strlen(ctx->srt_url) == 0) {
+		blog(LOG_ERROR, "SRT URL is empty");
+		return -1;
+	}
+
+	if (strstr(ctx->srt_url, "latency=") != NULL) {
+		snprintf(final_url, sizeof(final_url), "%s", ctx->srt_url);
+	} else if (strchr(ctx->srt_url, '?') != NULL) {
+		snprintf(final_url, sizeof(final_url), "%s&latency=%d", ctx->srt_url, latency_us);
+	} else {
+		snprintf(final_url, sizeof(final_url), "%s?latency=%d", ctx->srt_url, latency_us);
+	}
+
+	blog(LOG_INFO, "Opening SRT stream: %s", final_url);
+
 	/* Open the SRT URL */
-	ret = avformat_open_input(&ctx->fmt_ctx, ctx->srt_url, NULL, &opts);
+	ret = avformat_open_input(&ctx->fmt_ctx, final_url, NULL, &opts);
 	av_dict_free(&opts);
 
 	if (ret < 0) {
 		char errbuf[256];
 		av_strerror(ret, errbuf, sizeof(errbuf));
 		blog(LOG_ERROR, "Cannot open SRT stream: %s (error: %s)",
-		     ctx->srt_url, errbuf);
+		     final_url, errbuf);
 		return ret;
 	}
 
@@ -337,20 +512,42 @@ static void output_frame_to_obs(struct srt_source_context *ctx, AVFrame *src)
 	default:                   obs_cs = VIDEO_CS_DEFAULT; break;
 	}
 
+	enum video_format obs_format = VIDEO_FORMAT_NONE;
+	int num_planes = 0;
+
 	if (src_fmt == AV_PIX_FMT_YUV420P || src_fmt == AV_PIX_FMT_YUVJ420P) {
-		frame.format = VIDEO_FORMAT_I420;
-		video_format_get_parameters_for_format(obs_cs, frame.full_range ? VIDEO_RANGE_FULL : VIDEO_RANGE_PARTIAL, frame.format, frame.color_matrix, frame.color_range_min, frame.color_range_max);
-		for (int i = 0; i < 3; i++) {
-			frame.data[i]     = src->data[i];
-			frame.linesize[i] = src->linesize[i];
-		}
-		obs_source_output_video(ctx->source, &frame);
-		ctx->frames_decoded++;
-		return;
+		obs_format = VIDEO_FORMAT_I420;
+		num_planes = 3;
 	} else if (src_fmt == AV_PIX_FMT_NV12) {
-		frame.format = VIDEO_FORMAT_NV12;
+		obs_format = VIDEO_FORMAT_NV12;
+		num_planes = 2;
+	} else if (src_fmt == AV_PIX_FMT_YUYV422) {
+		obs_format = VIDEO_FORMAT_YUY2;
+		num_planes = 1;
+	} else if (src_fmt == AV_PIX_FMT_UYVY422) {
+		obs_format = VIDEO_FORMAT_UYVY;
+		num_planes = 1;
+	} else if (src_fmt == AV_PIX_FMT_YUV422P || src_fmt == AV_PIX_FMT_YUVJ422P) {
+		obs_format = VIDEO_FORMAT_I422;
+		num_planes = 3;
+	} else if (src_fmt == AV_PIX_FMT_YUV444P || src_fmt == AV_PIX_FMT_YUVJ444P) {
+		obs_format = VIDEO_FORMAT_I444;
+		num_planes = 3;
+	} else if (src_fmt == AV_PIX_FMT_RGBA) {
+		obs_format = VIDEO_FORMAT_RGBA;
+		num_planes = 1;
+	} else if (src_fmt == AV_PIX_FMT_BGRA) {
+		obs_format = VIDEO_FORMAT_BGRA;
+		num_planes = 1;
+	} else if (src_fmt == AV_PIX_FMT_BGR0) {
+		obs_format = VIDEO_FORMAT_BGRX;
+		num_planes = 1;
+	}
+
+	if (obs_format != VIDEO_FORMAT_NONE) {
+		frame.format = obs_format;
 		video_format_get_parameters_for_format(obs_cs, frame.full_range ? VIDEO_RANGE_FULL : VIDEO_RANGE_PARTIAL, frame.format, frame.color_matrix, frame.color_range_min, frame.color_range_max);
-		for (int i = 0; i < 2; i++) {
+		for (int i = 0; i < num_planes; i++) {
 			frame.data[i]     = src->data[i];
 			frame.linesize[i] = src->linesize[i];
 		}
@@ -562,19 +759,31 @@ static void *decode_thread_proc(void *data)
 			continue;
 		}
 
-		/* Receive decoded frames */
-		while (ret >= 0 && !ctx->thread_stop) {
+		/* Receive decoded frame */
+		while (ret >= 0) {
 			ret = avcodec_receive_frame(ctx->codec_ctx, ctx->decoded_frame);
-
-			if (ret == AVERROR(EAGAIN)) {
+			if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
 				break;
-			} else if (ret == AVERROR_EOF) {
-				break;
-			} else if (ret < 0) {
-				blog(LOG_WARNING, "Error receiving frame: %d", ret);
+			else if (ret < 0) {
+				blog(LOG_ERROR, "Error during decoding");
 				break;
 			}
 
+			/* Latency Drift Purge: If frame is stale (>150ms behind live clock), skip intermediate render */
+			uint64_t now_ns = os_gettime_ns();
+			if (ctx->first_pts_ns > 0 && ctx->decoded_frame->best_effort_timestamp != AV_NOPTS_VALUE) {
+				AVStream *st = ctx->fmt_ctx->streams[ctx->video_stream_idx];
+				uint64_t pts_ns = ctx->decoded_frame->best_effort_timestamp * 1000000000ULL * st->time_base.num / st->time_base.den;
+				uint64_t expected_ts = ctx->first_sys_ns + (pts_ns - ctx->first_pts_ns);
+				if (now_ns > expected_ts + 150000000ULL) {
+					/* Skip stale render to catch up to live stream instantly */
+					ctx->frames_dropped++;
+					av_frame_unref(ctx->decoded_frame);
+					continue;
+				}
+			}
+
+			/* Output frame to OBS engine */
 			output_frame_to_obs(ctx, ctx->decoded_frame);
 			av_frame_unref(ctx->decoded_frame);
 		}
@@ -693,12 +902,18 @@ static void *srt_source_create(obs_data_t *settings, obs_source_t *source)
 	/* Start streaming immediately — don't wait for activate() */
 	start_stream(ctx);
 
+	update_source_tally(ctx);
+
 	return ctx;
 }
 
 static void srt_source_destroy(void *data)
 {
 	struct srt_source_context *ctx = (struct srt_source_context *)data;
+
+	if (ctx->srt_url) {
+		notify_hub_tally(ctx->srt_url, "OFF AIR");
+	}
 
 	stop_stream(ctx);
 
@@ -710,18 +925,29 @@ static void srt_source_destroy(void *data)
 	blog(LOG_INFO, "SRT Source destroyed");
 }
 
+static bool refresh_button_clicked(obs_properties_t *props, obs_property_t *p, void *data)
+{
+	UNUSED_PARAMETER(props);
+	UNUSED_PARAMETER(p);
+	struct srt_source_context *ctx = (struct srt_source_context *)data;
+	if (ctx) {
+		blog(LOG_INFO, "Manual refresh requested by user");
+		stop_stream(ctx);
+		start_stream(ctx);
+	}
+	return true;
+}
+
 static void srt_source_get_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_string(settings, SETTING_SRT_URL,
-		"srt://0.0.0.0:9000?mode=listener&latency=120000&tlpktdrop=1");
-	obs_data_set_default_int(settings, SETTING_LATENCY, DEFAULT_LATENCY);
+		"srt://0.0.0.0:9000?mode=listener&tlpktdrop=1");
+	obs_data_set_default_int(settings, SETTING_LATENCY, 120); /* default 120ms */
 	obs_data_set_default_bool(settings, SETTING_RECONNECT, true);
 }
 
 static obs_properties_t *srt_source_get_properties(void *data)
 {
-	UNUSED_PARAMETER(data);
-
 	obs_properties_t *props = obs_properties_create();
 
 	obs_properties_add_text(props, SETTING_SRT_URL,
@@ -729,14 +955,18 @@ static obs_properties_t *srt_source_get_properties(void *data)
 		OBS_TEXT_DEFAULT);
 
 	obs_properties_add_int_slider(props, SETTING_LATENCY,
-		obs_module_text("Latency"),
-		20000,    /* min: 20ms */
-		5000000,  /* max: 5s */
-		1000      /* step: 1ms */
+		"Latency (ms)",
+		0,       /* min: 0ms (lowest possible) */
+		3000,    /* max: 3000ms (3s) */
+		1        /* step: 1ms */
 	);
 
 	obs_properties_add_bool(props, SETTING_RECONNECT,
 		obs_module_text("AutoReconnect"));
+
+	obs_properties_add_button(props, "refresh_button",
+		"Refresh / Reconnect Stream",
+		refresh_button_clicked);
 
 	return props;
 }
@@ -746,10 +976,10 @@ static void srt_source_update(void *data, obs_data_t *settings)
 	struct srt_source_context *ctx = (struct srt_source_context *)data;
 
 	const char *new_url = obs_data_get_string(settings, SETTING_SRT_URL);
-	int new_latency = (int)obs_data_get_int(settings, SETTING_LATENCY);
+	int new_latency_ms = (int)obs_data_get_int(settings, SETTING_LATENCY);
 	bool new_reconnect = obs_data_get_bool(settings, SETTING_RECONNECT);
 
-	/* Check if URL actually changed */
+	/* Check if URL or Latency changed */
 	bool url_changed = false;
 	if (ctx->srt_url && new_url) {
 		url_changed = strcmp(ctx->srt_url, new_url) != 0;
@@ -759,16 +989,19 @@ static void srt_source_update(void *data, obs_data_t *settings)
 		url_changed = true;
 	}
 
+	bool latency_changed = (ctx->latency_us != new_latency_ms);
+
 	/* Update settings */
-	ctx->latency_us = new_latency;
+	ctx->latency_us = new_latency_ms;
 	ctx->reconnect_enabled = new_reconnect;
 
-	blog(LOG_INFO, "SRT Source updated: url=%s, latency=%dus, reconnect=%s, url_changed=%s",
-	     new_url ? new_url : "(none)", new_latency,
+	blog(LOG_INFO, "SRT Source updated: url=%s, latency=%dms, reconnect=%s, url_changed=%s, latency_changed=%s",
+	     new_url ? new_url : "(none)", new_latency_ms,
 	     new_reconnect ? "yes" : "no",
-	     url_changed ? "yes" : "no");
+	     url_changed ? "yes" : "no",
+	     latency_changed ? "yes" : "no");
 
-	if (url_changed) {
+	if (url_changed || latency_changed) {
 		/* Stop existing stream */
 		stop_stream(ctx);
 
@@ -781,9 +1014,11 @@ static void srt_source_update(void *data, obs_data_t *settings)
 			ctx->srt_url = bstrdup(new_url);
 		}
 
-		/* Restart with new URL */
+		/* Restart with new URL/latency */
 		start_stream(ctx);
 	}
+
+	update_source_tally(ctx);
 }
 
 static void srt_source_activate(void *data)
@@ -795,16 +1030,28 @@ static void srt_source_activate(void *data)
 	if (!ctx->thread_running) {
 		start_stream(ctx);
 	}
+	update_source_tally(ctx);
 }
 
 static void srt_source_deactivate(void *data)
 {
-	UNUSED_PARAMETER(data);
+	struct srt_source_context *ctx = (struct srt_source_context *)data;
 	blog(LOG_INFO, "SRT Source deactivated (removed from program output)");
-	/* Intentionally do NOT stop the stream here.
-	 * The stream lifecycle is managed by create/update/destroy.
-	 * Stopping on deactivate would kill the stream every time
-	 * the user switches scenes. */
+	update_source_tally(ctx);
+}
+
+static void srt_source_show(void *data)
+{
+	struct srt_source_context *ctx = (struct srt_source_context *)data;
+	blog(LOG_INFO, "SRT Source shown (visible in preview or program)");
+	update_source_tally(ctx);
+}
+
+static void srt_source_hide(void *data)
+{
+	struct srt_source_context *ctx = (struct srt_source_context *)data;
+	blog(LOG_INFO, "SRT Source hidden");
+	update_source_tally(ctx);
 }
 
 static void srt_source_video_tick(void *data, float seconds)
@@ -849,6 +1096,8 @@ static struct obs_source_info srt_source_info = {
 	.update         = srt_source_update,
 	.activate       = srt_source_activate,
 	.deactivate     = srt_source_deactivate,
+	.show           = srt_source_show,
+	.hide           = srt_source_hide,
 	.video_tick     = srt_source_video_tick,
 	.get_width      = srt_source_get_width,
 	.get_height     = srt_source_get_height,
